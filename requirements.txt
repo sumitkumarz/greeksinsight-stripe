@@ -1,0 +1,4 @@
+flask
+flask-restx
+stripe
+flask_sqlalchemy
