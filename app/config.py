@@ -1,3 +1,4 @@
+
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -17,3 +18,7 @@ class Config:
     RESTX_MASK_SWAGGER = False
     SQLALCHEMY_DATABASE_URI = os.environ.get('SQLALCHEMY_DATABASE_URI')
     SQLALCHEMY_TRACK_MODIFICATIONS = os.environ.get('SQLALCHEMY_TRACK_MODIFICATIONS') == 'True'
+    FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+    STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+    STRIPE_SUCCESS_URL = os.environ.get('STRIPE_SUCCESS_URL', f"{FRONTEND_URL}/dashboard")
+    STRIPE_CANCEL_URL = os.environ.get('STRIPE_CANCEL_URL', f"{FRONTEND_URL}")

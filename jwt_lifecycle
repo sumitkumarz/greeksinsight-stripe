@@ -1,0 +1,43 @@
+// JWT Token Lifecycle
+digraph {
+	rankdir=LR size=8
+	A [label="User Login
+(Credentials/Auth)"]
+	B [label="Backend Issues Tokens
+- Access Token (short-lived)
+- Refresh Token (long-lived)"]
+	C [label="Client Stores Tokens
+- Access in memory
+- Refresh in HttpOnly cookie"]
+	D [label="API Request with Access Token"]
+	E [label="Backend Validates Token
+- Signature
+- Expiry
+- Claims"]
+	F [label="Access Token Expired?"]
+	G [label="Refresh Token Flow
+- Client sends refresh token"]
+	H [label="Backend Validates Refresh Token
+(DB/Redis)"]
+	I [label="New Access Token Issued
+(Optional: Rotate Refresh Token)"]
+	J [label="Revocation
+- Logout / Compromise
+- Mark Refresh Token Invalid"]
+	K [label="Audit Logs & Monitoring"]
+	A -> B
+	B -> C
+	C -> D
+	D -> E
+	E -> F
+	F -> D [label="No (Still Valid)"]
+	F -> G [label="Yes (Expired)"]
+	G -> H
+	H -> I [label=Valid]
+	H -> A [label="Invalid → Re-login"]
+	I -> C [label="Return New Token"]
+	C -> J [label="Logout/Compromise"]
+	J -> H [label="Revoked → Block Refresh"]
+	H -> K
+	J -> K
+}

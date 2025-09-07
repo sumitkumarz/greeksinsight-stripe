@@ -68,3 +68,4 @@ def verify_app_jwt(token: str, app_jwt_secret, app_jwt_alg) -> Tuple[Optional[Di
         return None, f"Invalid app token: {e}"
     except Exception as e:
         return None, str(e)
+

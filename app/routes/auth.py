@@ -1,7 +1,8 @@
+
 from flask_restx import Namespace, Resource, fields
 import os
 from app.config import Config
-from flask import request, jsonify
+from flask import request, jsonify, g
 import jwt
 import time
 import requests
@@ -9,9 +10,17 @@ import hmac
 import hashlib
 import base64
 import json
+import boto3
+import stripe
+# Import token_required and requires_role decorators from new location
+from app.decorators.token_required import token_required
+from app.decorators.requires_role import requires_role
+
+
 
 from app.util.auth_utils import get_app_claims_from_db, issue_app_jwt, verify_cognito_id_token
 auth_ns = Namespace('auth', description='Authentication and authorization operations')
+
 
 user_model = auth_ns.model('User', {
     'username': fields.String(required=True, description='Username'),
@@ -65,6 +74,36 @@ class VerifyIdToken(Resource):
         print("Verification result - Error:", error)
         if error:
             return jsonify({"error": f"ID token verification failed: {error}"}), 401
+
+        # --- Stripe customer check/create logic ---
+        user_id = claims.get("sub")
+        email = claims.get("email")
+        name = claims.get("name")
+        phone = claims.get("phone_number")
+        dynamodb = boto3.resource('dynamodb', region_name="us-east-1")
+        users_table = dynamodb.Table('Users')
+        # Try to get user by userId (sub)
+        user_item = users_table.get_item(Key={"userId": user_id}).get("Item")
+        stripe_customer_id = None
+        if user_item:
+            stripe_customer_id = user_item.get("stripeCustomerId")
+        if not stripe_customer_id:
+            # Create Stripe customer
+            stripe.api_key = APP_JWT_SECRET if hasattr(Config, 'STRIPE_SECRET_KEY') and not Config.STRIPE_SECRET_KEY else Config.STRIPE_SECRET_KEY
+            stripe_customer = stripe.Customer.create(
+                email=email,
+                name=name if name else None,
+                phone=phone if phone else None,
+                metadata={"cognitoUserId": user_id}
+            )
+            stripe_customer_id = stripe_customer["id"]
+            # Store in DynamoDB
+            users_table.update_item(
+                Key={"userId": user_id},
+                UpdateExpression="SET stripeCustomerId=:c",
+                ExpressionAttributeValues={":c": stripe_customer_id}
+            )
+
         # Optional: enrich with app roles
         extra = get_app_claims_from_db(claims["sub"])
         app_token = issue_app_jwt(claims, extra, APP_JWT_SECRET, APP_JWT_ALG, APP_JWT_TTL_SECONDS)
@@ -112,8 +151,6 @@ class VerifyAccessToken(Resource):
             return jsonify({"error": f"App access token verification failed: {e}"}), 401
 
 
-
-
 def get_secret_hash(username):
     message = username + Config.CLIENT_ID
     key = Config.CLIENT_SECRET.encode('utf-8')
@@ -157,3 +194,67 @@ class CognitoIdpToken(Resource):
         tokens = response.json()
         return tokens, 200
 
+
+
+
+# Example endpoint protected with @token_required
+@auth_ns.route('/secure-data')
+class SecureData(Resource):
+    @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
+    @token_required
+    def get(self):
+        claims = getattr(g, 'user_claims', {})
+        return {'message': 'Secure data access granted', 'user': claims}, 200
+
+@auth_ns.route('/admin-only')
+class AdminOnly(Resource):
+    @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
+    @requires_role('admin')
+    def get(self):
+        claims = getattr(g, 'user_claims', {})
+        return {'message': 'Admin access granted', 'user': claims}, 200
+
+
+
+from app.util.cognito_logout import cognito_global_logout
+
+@auth_ns.route('/logout')
+class Logout(Resource):
+    @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <appToken>', 'required': True}})
+    @auth_ns.expect(auth_ns.model('LogoutPayload', {}))
+    def post(self):
+        # Accepts blank JSON payload and Authorization header
+        _ = request.get_json(force=True, silent=True)  # Accepts blank or empty JSON
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+        app_token = auth_header.split(' ', 1)[1]
+        # Validate appToken
+        from app.util.auth_utils import verify_app_jwt
+        claims, error = verify_app_jwt(app_token, APP_JWT_SECRET, APP_JWT_ALG)
+        if error or not claims:
+            return jsonify({"error": "Invalid or expired appToken"}), 401
+        # Invalidate session (stub: implement DB/Redis removal if needed)
+        # TODO: Remove session from DB/Redis here
+        access_token = request.headers.get('X-Cognito-AccessToken')
+        cognito_logout_success = False
+        if access_token:
+            cognito_logout_success = cognito_global_logout(access_token)
+        resp = jsonify({"message": "Logged out successfully"})
+        resp.set_cookie(
+            "appToken",
+            "",
+            max_age=0,
+            httponly=True,
+            secure=True,
+            samesite="Strict"
+        )
+        return resp
+
+
+# --- Model for create_checkout ---
+create_checkout_model = auth_ns.model('CreateCheckout', {
+    'userId': fields.String(required=True, description='User ID'),
+    'email': fields.String(required=True, description='User email'),
+    'planId': fields.String(required=True, description='UI-friendly plan name'),
+})
