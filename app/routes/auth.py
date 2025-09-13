@@ -12,13 +12,11 @@ import base64
 import json
 import boto3
 import stripe
-# Import token_required and requires_role decorators from new location
-from app.decorators.token_required import token_required
-from app.decorators.requires_role import requires_role
+
+from app.util.cognito_logout import cognito_global_logout
 
 
-
-from app.util.auth_utils import get_app_claims_from_db, issue_app_jwt, verify_cognito_id_token
+from app.util.auth_utils import issue_app_jwt, verify_cognito_id_token
 auth_ns = Namespace('auth', description='Authentication and authorization operations')
 
 
@@ -52,15 +50,9 @@ APP_JWT_ALG = 'HS256'  # You can add to config.py if needed
 APP_JWT_TTL_SECONDS = 3600  # You can add to config.py if needed
 
 
-@auth_ns.route('/dummy')
-class Dummy(Resource):
-    def get(self):
-        """Dummy GET endpoint for testing"""
-        return {'message': 'Auth dummy endpoint is working.'}, 200
 
-
-@auth_ns.route('/verify-id-token')
-class VerifyIdToken(Resource):
+@auth_ns.route('/login')
+class Login(Resource):
     @auth_ns.expect(verify_id_token_model)
     def post(self):
         data = request.get_json()
@@ -71,7 +63,6 @@ class VerifyIdToken(Resource):
         print("ID Token:", id_token)
         claims, error = verify_cognito_id_token(id_token, JWKS_URL, CLIENT_ID)
         print("Verification result - Claims:", claims)
-        print("Verification result - Error:", error)
         if error:
             return jsonify({"error": f"ID token verification failed: {error}"}), 401
 
@@ -80,6 +71,7 @@ class VerifyIdToken(Resource):
         email = claims.get("email")
         name = claims.get("name")
         phone = claims.get("phone_number")
+        groups = claims.get("cognito:groups", [])
         dynamodb = boto3.resource('dynamodb', region_name="us-east-1")
         users_table = dynamodb.Table('Users')
         # Try to get user by userId (sub)
@@ -105,7 +97,7 @@ class VerifyIdToken(Resource):
             )
 
         # Optional: enrich with app roles
-        extra = get_app_claims_from_db(claims["sub"])
+        extra = {"roles": groups}
         app_token = issue_app_jwt(claims, extra, APP_JWT_SECRET, APP_JWT_ALG, APP_JWT_TTL_SECONDS)
         resp = jsonify({
             "appToken": app_token,
@@ -121,34 +113,6 @@ class VerifyIdToken(Resource):
             samesite="Strict"
         )
         return resp
-
-
-@auth_ns.route('/verify-access-token')
-class VerifyAccessToken(Resource):
-    @auth_ns.expect(verify_access_token_model)
-    def post(self):
-        data = request.get_json()
-        token = data.get("appToken")
-        if not token:
-            return jsonify({"error": "appToken required"}), 400
-        try:
-            claims = jwt.decode(token, APP_JWT_SECRET, algorithms=[APP_JWT_ALG])
-            expected_iss = "your-backend-service"
-            now = int(time.time())
-            errors = []
-            if claims.get("iss") != expected_iss:
-                errors.append("Invalid issuer")
-            if not claims.get("sub"):
-                errors.append("Missing subject (sub)")
-            if not claims.get("iat") or not isinstance(claims["iat"], int) or claims["iat"] > now + 60:
-                errors.append("Invalid issued-at (iat)")
-            if not claims.get("exp") or not isinstance(claims["exp"], int) or claims["exp"] < now:
-                errors.append("Token expired (exp)")
-            if errors:
-                return jsonify({"error": ", ".join(errors)}), 403
-            return jsonify({"claims": claims, "authorized": True})
-        except Exception as e:
-            return jsonify({"error": f"App access token verification failed: {e}"}), 401
 
 
 def get_secret_hash(username):
@@ -196,27 +160,16 @@ class CognitoIdpToken(Resource):
 
 
 
-
-# Example endpoint protected with @token_required
-@auth_ns.route('/secure-data')
-class SecureData(Resource):
-    @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
-    @token_required
-    def get(self):
-        claims = getattr(g, 'user_claims', {})
-        return {'message': 'Secure data access granted', 'user': claims}, 200
-
-@auth_ns.route('/admin-only')
-class AdminOnly(Resource):
-    @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
-    @requires_role('admin')
-    def get(self):
-        claims = getattr(g, 'user_claims', {})
-        return {'message': 'Admin access granted', 'user': claims}, 200
+# @auth_ns.route('/admin-only')
+# class AdminOnly(Resource):
+#     @auth_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
+#     @requires_role('admin')
+#     def get(self):
+#         claims = getattr(g, 'user_claims', {})
+#         return {'message': 'Admin access granted', 'user': claims}, 200
 
 
 
-from app.util.cognito_logout import cognito_global_logout
 
 @auth_ns.route('/logout')
 class Logout(Resource):
@@ -250,11 +203,3 @@ class Logout(Resource):
             samesite="Strict"
         )
         return resp
-
-
-# --- Model for create_checkout ---
-create_checkout_model = auth_ns.model('CreateCheckout', {
-    'userId': fields.String(required=True, description='User ID'),
-    'email': fields.String(required=True, description='User email'),
-    'planId': fields.String(required=True, description='UI-friendly plan name'),
-})

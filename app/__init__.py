@@ -1,7 +1,6 @@
 from flask import Flask
 from flask_restx import Api
 from app.routes.membership import membership_ns
-from app.routes.onboard import onboard_ns
 from flask_sqlalchemy import SQLAlchemy
 from app.models.user import db
 from flask_cors import CORS
@@ -11,6 +10,7 @@ def create_app():
     from app.routes.auth import auth_ns
     from app.routes.api import api_ns
     from app.routes.stripe_webhook import webhook_bp
+    from app.routes.admin import admin_ns
     api.add_namespace(auth_ns)
     api.add_namespace(api_ns)
     app = Flask(__name__)
@@ -19,6 +19,6 @@ def create_app():
     db.init_app(app)
     api.init_app(app)
     api.add_namespace(membership_ns)
-    api.add_namespace(onboard_ns)
+    api.add_namespace(admin_ns)
     app.register_blueprint(webhook_bp)
     return app

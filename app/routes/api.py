@@ -1,5 +1,7 @@
-import traceback
 
+
+import traceback
+from app.util.auth_utils import update_cognito_user_groups
 from flask_restx import Namespace, Resource, fields
 from flask import request, jsonify, g
 from app.decorators.token_required import token_required
@@ -23,47 +25,17 @@ sns_client = boto3.client("sns", region_name="us-east-1")
 
 
 api_ns = Namespace('api', description='General user APIs')
-
-# --- Model for create_checkout ---
+from app.util.stripe_utils import (
+    find_user_by_email_case_insensitive,
+    find_plan_by_id_case_insensitive,
+    ensure_stripe_customer,
+    build_checkout_session_params,
+    get_stripe_customer_id_by_email,
+    send_failure_sns
+)
 create_checkout_model = api_ns.model('CreateCheckout', {
-    'userId': fields.String(required=True, description='User ID'),
-    'email': fields.String(required=True, description='User email'),
     'planId': fields.String(required=True, description='UI-friendly plan name'),
 })
-
-def get_stripe_customer_id_by_email(email):
-    table = users_table
-    response = table.scan(
-        FilterExpression=Attr("email").eq(email)
-    )
-    items = response.get("Items", [])
-    if not items:
-        return None
-    return items[0].get("stripeCustomerId")
-
-def create_checkout_session(email, price_id, user_id):
-    try:
-        stripe_customer_id = get_stripe_customer_id_by_email(email)
-        print(f"Stripe customer id: {stripe_customer_id}")
-        # Create Stripe Checkout session
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            mode="subscription",
-            customer=stripe_customer_id,
-            line_items=[{"price": price_id, "quantity": 1}],
-            success_url=Config.STRIPE_SUCCESS_URL,
-            cancel_url=Config.STRIPE_CANCEL_URL,
-            metadata={"userId": user_id, "planId": price_id}
-        )
-        return {"sessionId": session.id, "url": session.url}
-    except Exception as e:
-        print(f"❌ Failed to create checkout session for user {user_id}: {str(e)}")
-        raise
-
-def send_failure_sns(subject, message):
-    import boto3
-    topic_arn = os.environ.get("FAILURE_TOPIC_ARN", "arn:aws:sns:us-east-1:609717032481:CognitoLambdaFailures")
-    boto3.client('sns').publish(TopicArn=topic_arn, Subject=subject, Message=message)
 
 @api_ns.route('/create-checkout')
 class CreateCheckout(Resource):
@@ -73,25 +45,46 @@ class CreateCheckout(Resource):
     def post(self):
         try:
             data = request.json
-            print("CreateCheckout called with data:", data)  # Debugging line
             claims = getattr(g, 'user_claims', {})
             user_id = claims.get("user_id") or claims.get("sub")
             email = claims.get("email")
             plan_id = data.get("planId")
-            print("CreateCheckout called with user_id:", user_id, "email:", email, "plan_id:", plan_id)  # Debugging line
             if not (user_id and email and plan_id):
-                return jsonify({"error": "Missing parameters"}), 400
-            resp = plans_table.get_item(Key={"planId": plan_id})
-            print("DynamoDB response for planId:", resp)  # Debugging line
-            if "Item" not in resp:
-                return jsonify({"error": "Invalid planId"}), 404
-            price_id = resp["Item"]["stripePriceId"]
-            result = create_checkout_session(email=email, price_id=price_id, user_id=user_id)
-            return result, 200
+                return {"error": "Missing parameters"}, 400
+            user_item = find_user_by_email_case_insensitive(email)
+            if user_item:
+                payment_status = str(user_item.get("paymentStatus", "")).lower()
+                subscription_status = str(user_item.get("subscriptionStatus", "")).lower()
+                if payment_status == "paid" and subscription_status == "complete":
+                    return {"error": "User already has an active subscription."}, 400
+            plan_item = find_plan_by_id_case_insensitive(plan_id)
+            print(plan_item)
+            if not plan_item:
+                return {"error": "Invalid planId"}, 404
+            price_id = plan_item["stripePriceId"]
+            print(price_id)
+            try:
+                stripe_customer_id = ensure_stripe_customer(user_item, email, user_id)
+            except Exception as e:
+                return {"error": str(e)}, 500
+            print(f"Creating checkout session for user {email} with plan {plan_id} (price {price_id}), stripe customer {stripe_customer_id}")
+            allowed_countries_env = Config.STRIPE_ALLOWED_COUNTRIES
+            allowed_countries = [c.strip() for c in allowed_countries_env.split(',') if c.strip()]
+            session_params = build_checkout_session_params(stripe_customer_id, price_id, user_id, allowed_countries)
+            session_params["customer_update"] = {"shipping": "auto"}
+            print("Checkout session params:", session_params)
+            try:
+                session = stripe.checkout.Session.create(**session_params)
+                print("Created checkout session:", session)
+                return {"sessionId": session.id, "url": session.url, "stripeCustomerId": stripe_customer_id}, 200
+            except Exception as e:
+                print("Stripe checkout error:", str(e))
+                return {"error": f"Failed to create checkout session: {str(e)}"}, 500
         except Exception as e:
             tb = traceback.format_exc()
             send_failure_sns("CreateCheckout Failure", f"{str(e)}\n{tb}")
-            return jsonify({"error": "Internal server error"}), 500
+            print("Stripe checkout error:", str(e))
+            return {"error": "Internal server error"}, 500
 
 @api_ns.route('/user-details')
 class UserDetails(Resource):
@@ -99,30 +92,55 @@ class UserDetails(Resource):
     @token_required
     def get(self):
         claims = getattr(g, 'user_claims', {})
+        print(claims)
         print("User Claims:", claims)  # Debugging line
         email = claims.get('email')
         if not email:
             return {'error': 'Email or username not found in token'}, 400
-        # Example: Fetch user details from database using email and username
-        # Replace this with actual DB query logic
+        # Fetch user details from DynamoDB Users table using email
+        response = users_table.scan(
+            FilterExpression=Attr("email").eq(email)
+        )
+        items = response.get("Items", [])
+        if not items:
+            return {'error': 'User not found'}, 404
+        user = items[0]
         user_details = {
-            'name': 'John Doe',           # Replace with actual value from DB
-            'phone_number': '+123456789', # Replace with actual value from DB
-            'email': email,
-            'plan_opted': 'Premium'       # Replace with actual value from DB
+            'name': user.get('name'),
+            'email': user.get('email'),
+            'planOpted': user.get('planOpted'),
         }
         return {'user_details': user_details}, 200
 
-@api_ns.route('/user-fruits')
-class UserFruits(Resource):
-    @api_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
+
+@api_ns.route('/cancel-subscription')
+class CancelSubscription(Resource):
+    @api_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <appToken>', 'required': True}})
     @token_required
-    def get(self):
+    def post(self):
         claims = getattr(g, 'user_claims', {})
         email = claims.get('email')
         if not email:
-            return {'error': 'Email or username not found in token'}, 400
-        # Example: Fetch user's chosen fruits from database using email and username
-        # Replace this with actual DB query logic
-        fruits = ['Apple', 'Banana', 'Mango']  # Replace with actual value from DB
-        return {'fruits': fruits}, 200
+            return {"error": "Email not found in token"}, 400
+        # Find user by case-insensitive email
+        user_resp = users_table.scan()
+        user_item = None
+        for item in user_resp.get("Items", []):
+            if item.get("email", "").lower() == email.lower():
+                user_item = item
+                break
+        if not user_item:
+            return {"error": "User not found"}, 404
+        stripe_subscription_id = user_item.get("stripeSubscriptionId")
+        if not stripe_subscription_id:
+            return {"error": "No Stripe subscription found for user"}, 404
+        try:
+            # Cancel the subscription at Stripe
+            cancel_resp = stripe.Subscription.modify(
+                stripe_subscription_id,
+                cancel_at_period_end=True
+            )
+            return {"message": "Subscription canceled", "stripe_response": cancel_resp}, 200
+        except Exception as e:
+            print("Stripe cancel error:", str(e))
+            return {"error": str(e)}, 500

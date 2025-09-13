@@ -1,3 +1,16 @@
+
+
+
+from flask_restx import Namespace, Resource, fields
+from flask import request
+import stripe
+from app.config import Config
+
+stripe.api_key = Config.STRIPE_SECRET_KEY
+
+membership_ns = Namespace('membership', description='Membership related operations')
+
+
 import stripe
 from flask import request
 from flask_restx import Namespace, Resource, fields
@@ -73,7 +86,47 @@ business_bank_model = membership_ns.model('BusinessBankAccount', {
     'account_holder_name': fields.String(required=True, description='Account holder name'),
     'account_holder_type': fields.String(required=True, description='Account holder type (individual/company)'),
 })
+# Swagger model for input
+subscription_id_model = membership_ns.model('SubscriptionId', {
+    'subscription_id': fields.String(required=True, description='Stripe Subscription ID')
+})
+# Place this after membership_ns is defined
 
+# Model for payment method input
+payment_method_id_model = membership_ns.model('PaymentMethodId', {
+    'payment_method_id': fields.String(required=True, description='Stripe Payment Method ID')
+})
+
+# Endpoint to get payment method details
+@membership_ns.route('/payment-method-details')
+class PaymentMethodDetails(Resource):
+    @membership_ns.expect(payment_method_id_model)
+    def post(self):
+        '''Get Stripe payment method details by payment method id'''
+        data = request.get_json()
+        payment_method_id = data.get('payment_method_id')
+        if not payment_method_id:
+            return {'error': 'payment_method_id is required'}, 400
+        try:
+            payment_method = stripe.PaymentMethod.retrieve(payment_method_id)
+            return {'payment_method': payment_method}, 200
+        except Exception as e:
+            return {'error': str(e)}, 400
+@membership_ns.route('/stripe-subscription-details')
+class StripeSubscriptionDetails(Resource):
+    @membership_ns.expect(subscription_id_model)
+    def post(self):
+        '''Get Stripe subscription details by subscription id'''
+        data = request.get_json()
+        subscription_id = data.get('subscription_id')
+        if not subscription_id:
+            return {'error': 'subscription_id is required'}, 400
+        try:
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            return {'subscription': subscription}, 200
+        except Exception as e:
+            return {'error': str(e)}, 400
+        
 @membership_ns.route('/plans')
 class MembershipPlans(Resource):
     def get(self):
@@ -145,11 +198,28 @@ class CreatePrice(Resource):
 class CreateCheckoutSession(Resource):
     @membership_ns.expect(checkout_session_model)
     def post(self):
-        """Create a Stripe Checkout Session for subscription payment"""
+        """Create a Stripe Checkout Session for subscription payment. If no stripe_customer_id, create customer first."""
         data = request.json
         stripe.api_key = Config.STRIPE_SECRET_KEY
+        customer_id = data.get('stripe_customer_id')
+        # If no customer_id, create a new Stripe customer using email/username
+        if not customer_id:
+            email = data.get('email')
+            username = data.get('username')
+            if not email and not username:
+                return {'message': 'stripe_customer_id, email, or username required'}, 400
+            customer_params = {}
+            if email:
+                customer_params['email'] = email
+            if username:
+                customer_params['metadata'] = {'user_id': username}
+            try:
+                customer = stripe.Customer.create(**customer_params)
+                customer_id = customer['id']
+            except Exception as e:
+                return {'message': f'Failed to create Stripe customer: {str(e)}'}, 400
         session = stripe.checkout.Session.create(
-            customer=data['stripe_customer_id'],
+            customer=customer_id,
             line_items=[{
                 'price': data['price_id'],
                 'quantity': 1
@@ -158,7 +228,7 @@ class CreateCheckoutSession(Resource):
             success_url=data['success_url'],
             cancel_url=data['cancel_url']
         )
-        return {'checkout_session_id': session['id'], 'url': session['url']}
+        return {'checkout_session_id': session['id'], 'url': session['url'], 'stripe_customer_id': customer_id}
 
 # New endpoint for checkout session with trial and optional fields
 @membership_ns.route('/create-checkout-session-with-trial')

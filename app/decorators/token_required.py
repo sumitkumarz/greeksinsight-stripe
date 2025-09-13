@@ -1,6 +1,33 @@
+
 from functools import wraps
-from flask import request, jsonify, g
-import requests
+from flask import request, g
+import jwt
+import time
+from app.config import Config
+
+def verify_app_access_token(token):
+    """
+    Helper to verify app access token (moved from /verify-access-token endpoint)
+    Returns (claims, error_message) tuple
+    """
+    try:
+        claims = jwt.decode(token, Config.APP_JWT_SECRET, algorithms=[Config.APP_JWT_ALG])
+        expected_iss = "your-backend-service"
+        now = int(time.time())
+        errors = []
+        if claims.get("iss") != expected_iss:
+            errors.append("Invalid issuer")
+        if not claims.get("sub"):
+            errors.append("Missing subject (sub)")
+        if not claims.get("iat") or not isinstance(claims["iat"], int) or claims["iat"] > now + 60:
+            errors.append("Invalid issued-at (iat)")
+        if not claims.get("exp") or not isinstance(claims["exp"], int) or claims["exp"] < now:
+            errors.append("Token expired (exp)")
+        if errors:
+            return None, ", ".join(errors)
+        return claims, None
+    except Exception as e:
+        return None, f"App access token verification failed: {e}"
 
 # Decorator to require JWT token
 def token_required(f):
@@ -11,26 +38,12 @@ def token_required(f):
             return {'error': 'Authorization header missing or invalid'}, 401
 
         token = auth_header.split(' ')[1]
-        print("Token received:", token)  # Debugging line
-        verify_url = f"{request.host_url.rstrip('/')}/auth/verify-access-token"
 
-        try:
-            resp = requests.post(verify_url, json={'appToken': token}, timeout=3)
-
-            if resp.status_code != 200:
-                return {'error': 'Invalid or expired token'}, 401
-            try:
-                claims = resp.json().get('claims')
-            except ValueError:
-                return {'error': 'Invalid response from auth service'}, 502
-
-            if not claims:
-                return {'error': 'Token claims missing'}, 401
-
-            g.user_claims = claims
-
-        except requests.exceptions.RequestException as e:
-            return {'error': 'Authorization service unavailable', 'details': str(e)}, 503
-
+        claims, err = verify_app_access_token(token)
+        if err:
+            return {'error': err}, 401
+        if not claims:
+            return {'error': 'Token claims missing'}, 401
+        g.user_claims = claims
         return f(*args, **kwargs)
     return decorated

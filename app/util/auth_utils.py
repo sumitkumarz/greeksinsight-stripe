@@ -1,3 +1,4 @@
+
 import time
 import requests
 from typing import Dict, Tuple, Optional
@@ -30,21 +31,24 @@ def verify_cognito_id_token(id_token, jwks_url, client_id):
         id_token,
         public_key,
         algorithms=['RS256'],
-        audience=client_id
+        audience=client_id,
+        leeway=10 
     )
     return claims, None
 
-# App roles/claims enrichment (stub)
-def get_app_claims_from_db(cognito_sub: str) -> Dict:
-    roles = ["user"]
-    perms = ["read:dashboard"]
-    if cognito_sub.endswith("admin"):
-        roles.append("admin")
-        perms.extend(["write:dashboard", "manage:users"])
-    return {
-        "roles": roles,
-        "perms": perms
-    }
+# # App roles/claims enrichment (stub)
+# def get_app_claims_from_db(claims: str) -> Dict:
+#     # cognito_sub is actually the claims dict, not just the sub string
+#     print("---",claims)
+#     roles = claims.get("cognito:groups", [])
+#     perms = []
+#     # Add admin perms if user is in admin group
+#     if any(str(role).lower() == "admin" for role in roles):
+#         perms.extend(["write:dashboard", "manage:users"])
+#     return {
+#         "roles": roles,
+#         "perms": perms
+#     }
 
 # App JWT issuance & verification
 def issue_app_jwt(cognito_claims: Dict, extra_claims: Dict, app_jwt_secret, app_jwt_alg, app_jwt_ttl_seconds) -> str:
@@ -69,3 +73,30 @@ def verify_app_jwt(token: str, app_jwt_secret, app_jwt_alg) -> Tuple[Optional[Di
     except Exception as e:
         return None, str(e)
 
+# Remove all existing Cognito groups for a user and add a new one
+def update_cognito_user_groups(user_pool_id: str, username: str, new_group: str, region_name: str = "us-east-1"):
+    import boto3
+    cognito = boto3.client('cognito-idp', region_name=region_name)
+    # List all groups for the user
+    try:
+        groups_resp = cognito.admin_list_groups_for_user(UserPoolId=user_pool_id, Username=username)
+        current_groups = [g['GroupName'] for g in groups_resp.get('Groups', [])]
+    except Exception as e:
+        print(f"Error listing groups for user {username}: {e}")
+        current_groups = []
+    # Remove user from all current groups except the new one
+    for group in current_groups:
+        if group != new_group:
+            try:
+                cognito.admin_remove_user_from_group(UserPoolId=user_pool_id, Username=username, GroupName=group)
+            except cognito.exceptions.UserNotFoundException:
+                pass
+            except cognito.exceptions.ResourceNotFoundException:
+                pass
+            except Exception as e:
+                print(f"Error removing user {username} from group {group}: {e}")
+    # Add user to the new group
+    try:
+        cognito.admin_add_user_to_group(UserPoolId=user_pool_id, Username=username, GroupName=new_group)
+    except Exception as e:
+        print(f"Error adding user {username} to group {new_group}: {e}")
