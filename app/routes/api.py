@@ -1,3 +1,5 @@
+# Protected test endpoints (after api_ns is defined)
+from app.decorators.token_required import token_required
 
 
 import traceback
@@ -86,9 +88,9 @@ class CreateCheckout(Resource):
             print("Stripe checkout error:", str(e))
             return {"error": "Internal server error"}, 500
 
+
 @api_ns.route('/user-details')
 class UserDetails(Resource):
-    @api_ns.doc(params={'Authorization': {'in': 'header', 'description': 'Bearer <JWT>', 'required': True}})
     @token_required
     def get(self):
         claims = getattr(g, 'user_claims', {})
@@ -109,6 +111,7 @@ class UserDetails(Resource):
             'name': user.get('name'),
             'email': user.get('email'),
             'planOpted': user.get('planOpted'),
+            'cancelAt' : user.get('cancelAt'),
         }
         return {'user_details': user_details}, 200
 
@@ -140,7 +143,34 @@ class CancelSubscription(Resource):
                 stripe_subscription_id,
                 cancel_at_period_end=True
             )
-            return {"message": "Subscription canceled", "stripe_response": cancel_resp}, 200
+            
+
+            return {"message": "Subscription canceled"}, 200
         except Exception as e:
             print("Stripe cancel error:", str(e))
             return {"error": str(e)}, 500
+
+@api_ns.route('/data1')
+class Data1(Resource):
+    @token_required
+    def get(self):
+        return {"data": "This is data1", "user": getattr(g, 'user_claims', {})}, 200
+
+@api_ns.route('/data2')
+class Data2(Resource):
+    @token_required
+    def get(self):
+        return {"data": "This is data2", "user": getattr(g, 'user_claims', {})}, 200
+
+@api_ns.route('/data3')
+class Data3(Resource):
+    @token_required
+    def get(self):
+        return {"data": "This is data3", "user": getattr(g, 'user_claims', {})}, 200
+
+@api_ns.route('/data4')
+class Data4(Resource):
+    @token_required
+    def get(self):
+        return {"data": "This is data4", "user": getattr(g, 'user_claims', {})}, 200
+

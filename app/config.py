@@ -5,6 +5,8 @@ import boto3
 
 import os
 from dotenv import load_dotenv
+import redis
+
 load_dotenv()
 
 class Config:
@@ -38,3 +40,19 @@ class Config:
     CHECKOUT_STARTED_SNS = os.environ.get('CHECKOUT_STARTED_SNS', 'arn:aws:sns:us-east-1:609717032481:StripeCheckoutStarted')
     USERS_TABLE = DYNAMODB_RESOURCE.Table('Users')
     PLANS_TABLE = DYNAMODB_RESOURCE.Table(os.environ.get('PLANS_TABLE', 'Plans'))
+
+    ACCESS_TOKEN_EXPIRES = 180  # 15 min
+    REFRESH_TOKEN_EXPIRES = 2592000  # 30 days
+
+    REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+    REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "123")
+
+    REDIS_CLIENT = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        decode_responses=True  # store strings instead of bytes
+    )
+
+    JWT_ISSUER = os.environ.get("JWT_ISSUER")

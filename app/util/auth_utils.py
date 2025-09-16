@@ -1,4 +1,3 @@
-
 import time
 import requests
 from typing import Dict, Tuple, Optional
@@ -8,6 +7,10 @@ from jose import JWTError
 import base64
 import jwt
 from jose.utils import base64url_decode
+import uuid
+import bcrypt
+import json
+from app.config import Config
 
 # Construct RSA public key from JWK
 def construct_rsa_public_key(jwk):
@@ -36,31 +39,22 @@ def verify_cognito_id_token(id_token, jwks_url, client_id):
     )
     return claims, None
 
-# # App roles/claims enrichment (stub)
-# def get_app_claims_from_db(claims: str) -> Dict:
-#     # cognito_sub is actually the claims dict, not just the sub string
-#     print("---",claims)
-#     roles = claims.get("cognito:groups", [])
-#     perms = []
-#     # Add admin perms if user is in admin group
-#     if any(str(role).lower() == "admin" for role in roles):
-#         perms.extend(["write:dashboard", "manage:users"])
-#     return {
-#         "roles": roles,
-#         "perms": perms
-#     }
-
 # App JWT issuance & verification
-def issue_app_jwt(cognito_claims: Dict, extra_claims: Dict, app_jwt_secret, app_jwt_alg, app_jwt_ttl_seconds) -> str:
+def create_access_token(jti: str ,sub: str, email: str,extra_claims: Dict) -> str:
     now = int(time.time())
+    app_jwt_secret = Config.APP_JWT_SECRET
+    app_jwt_alg = Config.APP_JWT_ALG
+    app_jwt_ttl_seconds = Config.ACCESS_TOKEN_EXPIRES
     payload = {
-        "iss": "your-backend-service",
-        "sub": cognito_claims["sub"],
-        "email": cognito_claims.get("email"),
+        "iss": "greeksinsight.com",
+        "jti": jti,
+        "sub": sub,
+        "email": email,
         "iat": now,
         "exp": now + app_jwt_ttl_seconds,
         "roles": extra_claims.get("roles", []),
         "perms": extra_claims.get("perms", []),
+        "type": "access"
     }
     return jwt.encode(payload, app_jwt_secret, algorithm=app_jwt_alg)
 
@@ -100,3 +94,42 @@ def update_cognito_user_groups(user_pool_id: str, username: str, new_group: str,
         cognito.admin_add_user_to_group(UserPoolId=user_pool_id, Username=username, GroupName=new_group)
     except Exception as e:
         print(f"Error adding user {username} to group {new_group}: {e}")
+
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def check_password(password, hashed):
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+def create_refresh_token(jti, user_id, email, cognito_token):
+    now = int(time.time())
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "jti": jti,
+        "exp": now + Config.REFRESH_TOKEN_EXPIRES,
+        "iat": now,
+        "type": "refresh"
+    }
+    token = jwt.encode(payload, Config.APP_JWT_SECRET, algorithm=Config.APP_JWT_ALG)
+    # Store in Redis
+    key = f"refresh:{user_id}:{jti}"
+    #print(cognito_token)
+    value = json.dumps({
+        "user_id": user_id,
+        "issuedAt": now,
+        "expiresAt": now + Config.REFRESH_TOKEN_EXPIRES,
+        "cognito_token": cognito_token   # <-- store Cognito ID token
+    })
+    #print(value)
+    Config.REDIS_CLIENT.setex(key, Config.REFRESH_TOKEN_EXPIRES, value)
+    return token
+
+def revoke_refresh_token(user_id, jti):
+    key = f"refresh:{user_id}:{jti}"
+    Config.REDIS_CLIENT.delete(key)
+
+def is_refresh_token_valid(user_id, jti):
+    key = f"refresh:{user_id}:{jti}"
+    return Config.REDIS_CLIENT.exists(key)
+

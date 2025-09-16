@@ -11,8 +11,10 @@ def verify_app_access_token(token):
     Returns (claims, error_message) tuple
     """
     try:
+        print("Verifying app access token")
+        print(token)
         claims = jwt.decode(token, Config.APP_JWT_SECRET, algorithms=[Config.APP_JWT_ALG])
-        expected_iss = "your-backend-service"
+        expected_iss = Config.JWT_ISSUER
         now = int(time.time())
         errors = []
         if claims.get("iss") != expected_iss:
@@ -38,8 +40,8 @@ def token_required(f):
             return {'error': 'Authorization header missing or invalid'}, 401
 
         token = auth_header.split(' ')[1]
-
         claims, err = verify_app_access_token(token)
+        print(claims)
         if err:
             return {'error': err}, 401
         if not claims:

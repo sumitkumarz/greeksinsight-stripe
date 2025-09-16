@@ -14,7 +14,14 @@ def create_app():
     api.add_namespace(auth_ns)
     api.add_namespace(api_ns)
     app = Flask(__name__)
-    CORS(app, origins="*", supports_credentials=True, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+    CORS(
+        app,
+        origins=["http://127.0.0.1:3000"],
+        supports_credentials=True,
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+        expose_headers=["Content-Type", "Authorization"],
+    )
     app.config.from_object('app.config.Config')
     db.init_app(app)
     api.init_app(app)
